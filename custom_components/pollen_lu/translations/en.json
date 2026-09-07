@@ -22,6 +22,9 @@
           "scan_interval": "API polling interval in minutes"
         }
       }
+    },
+    "error": {
+      "invalid_scan_interval": "Enter a whole number of minutes greater than zero."
     }
   },
   "services": {

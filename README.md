@@ -25,6 +25,9 @@ If you like this component, please give it a star on [github](https://github.com
 
 ## Installation
 
+Requires Home Assistant **2025.3.0 or newer**. Compatibility regression tests
+run against Home Assistant 2026.9.0.
+
 1. Ensure that [HACS](https://hacs.xyz) is installed.
 2. Install **Pollen.lu** integration via HACS.
 3. Add **Pollen.lu** integration to Home Assistant:
@@ -42,13 +45,23 @@ In case you would like to install manually:
 
 After adding the integration, you can configure the polling interval via the integration options.
 
+The interval must be a positive whole number of minutes. Invalid intervals
+saved by an older version temporarily fall back to 60 minutes until corrected
+in the options dialog.
+
+Only one integration instance can be added, since every instance would read
+the same pollen data. Existing sensor unique IDs are preserved.
+
 ## Sensors
 
 This integration provides one sensor per pollen type. The sensor is named according to the pollen type (latin name).
 
 ### Sensor State
 
- The sensor state represents an index of the last pollen count.
+The sensor state is the latest pollen count, rounded to a whole number.
+An explicit `undetected` level reports zero. Missing or invalid measurements
+report `unknown`; inactive or missing pollen records, and failed API refreshes,
+make the affected sensors `unavailable`.
 
 ### Sensor Attributes
 
@@ -68,11 +81,20 @@ friendly_name       | Pollen Erle         | Localized friendly name
 
 The friendly name and the description are both localized to the Home Assistant system language. Available are english, german and french.
 
+If a translation is missing, its key is used as a fallback. Missing optional
+descriptions, pictures, and thresholds are omitted rather than replaced with
+invented values.
+
 ## Actions
 
 ### `pollen_lu.force_poll`
 
 This action forces the integration to poll the Pollen.lu API immediately.
+
+It refreshes all currently loaded Pollen.lu instances and updates their sensors.
+Response data is optional: automations can call the action without a
+`response_variable`, or capture `{"success": true}` when needed. If no instance
+is loaded or a refresh fails, the action reports an error.
 
 **Example usage:**
 
@@ -92,4 +114,15 @@ automation:
       at: '08:00:00'
     action:
       action: pollen_lu.force_poll
+```
+
+## Development checks
+
+The compatibility regression tests use Home Assistant 2026.9.0's flow, service,
+and coordinator APIs with mocked network requests and platform loading.
+Run them in a Python 3.14 virtual environment:
+
+```sh
+python -m pip install -r requirements-test.txt
+python -m pytest -q tests
 ```

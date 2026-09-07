@@ -22,6 +22,9 @@
           "scan_interval": "API-Abfrageintervall in Minuten"
         }
       }
+    },
+    "error": {
+      "invalid_scan_interval": "Geben Sie eine ganze Zahl von Minuten größer als null ein."
     }
   },
   "services": {

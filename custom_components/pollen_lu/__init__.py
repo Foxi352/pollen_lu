@@ -1,13 +1,15 @@
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.const import CONF_SCAN_INTERVAL
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import ServiceCall, SupportsResponse
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 
 from datetime import timedelta, datetime
 import logging
 
-from .const import DOMAIN, API_URL
+from .const import DOMAIN, API_URL, DEFAULT_SCAN_INTERVAL, is_valid_scan_interval
 
 _LOGGER = logging.getLogger(__name__)
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -16,6 +18,31 @@ async def async_setup(hass, config: dict) -> bool:
     """Set up the integration."""
     _LOGGER.debug("async_setup()")
 
+    async def handle_force_poll_service(call: ServiceCall) -> dict | None:
+        """Refresh the currently loaded integration instances."""
+        coordinators = [
+            coordinator
+            for coordinator in hass.data.get(DOMAIN, {}).values()
+            if coordinator.entry.state is ConfigEntryState.LOADED
+        ]
+        if not coordinators:
+            raise ServiceValidationError("No Pollen.lu instances are loaded")
+
+        for coordinator in coordinators:
+            await coordinator.async_force_poll()
+
+        result = {"success": True}
+        hass.states.async_set("pollen_lu.force_poll", result)
+        if call.return_response:
+            return result
+        return None
+
+    hass.services.async_register(
+        DOMAIN,
+        "force_poll",
+        handle_force_poll_service,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
     return True
 
 async def async_setup_entry(hass, entry) -> bool:
@@ -26,24 +53,12 @@ async def async_setup_entry(hass, entry) -> bool:
     await coordinator.async_config_entry_first_refresh()
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 
-    hass.async_create_task(
-        hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
-    )
-    # Ensure we add the update listener only once
-    if not entry.update_listeners:
-        entry.async_on_unload(entry.add_update_listener(async_reload_entry))
-        
-    # Launche the force_poll service call
-    async def handle_force_poll_service(call: ServiceCall) -> dict:
-        """Handle the force_poll service call."""
-        success = await coordinator.async_force_poll()
-        _LOGGER.debug(f"Force poll result: {success}")
-        hass.states.async_set("pollen_lu.force_poll", success)
-        return success
-        
-    # Register the force_poll service if not already registered
-    if not hass.services.has_service(DOMAIN, 'force_poll'):
-        hass.services.async_register(DOMAIN, 'force_poll', handle_force_poll_service,supports_response=SupportsResponse.ONLY)
+    try:
+        await hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
+    except BaseException:
+        hass.data[DOMAIN].pop(entry.entry_id, None)
+        raise
+    entry.async_on_unload(entry.add_update_listener(async_reload_entry))
 
     return True
 
@@ -53,8 +68,9 @@ async def async_unload_entry(hass, entry):
     if entry.entry_id in hass.data.get(DOMAIN, {}):
         unload_ok = await hass.config_entries.async_unload_platforms(entry, ["sensor"])
         if unload_ok:
-            coordinator = hass.data[DOMAIN].pop(entry.entry_id)
-            await coordinator.session.close()
+            hass.data[DOMAIN].pop(entry.entry_id)
+            if not hass.data[DOMAIN]:
+                hass.states.async_remove("pollen_lu.force_poll")
             return True
         return False
     _LOGGER.warning(f"Attempted to unload entry {entry.entry_id} that was not loaded.")
@@ -63,8 +79,7 @@ async def async_unload_entry(hass, entry):
 async def async_reload_entry(hass, entry):
     """Reload config entry when options are updated."""
     _LOGGER.debug("async_reload_entry()")
-    await async_unload_entry(hass, entry)
-    await async_setup_entry(hass, entry)
+    await hass.config_entries.async_reload(entry.entry_id)
 
 class MyCoordinator(DataUpdateCoordinator):
     def __init__(self, hass, entry, session):
@@ -89,13 +104,22 @@ class MyCoordinator(DataUpdateCoordinator):
             "Connection": "keep-alive",
         }
 
-        scan_interval = entry.options.get(CONF_SCAN_INTERVAL, entry.data.get(CONF_SCAN_INTERVAL, 60))
+        scan_interval = entry.options.get(
+            CONF_SCAN_INTERVAL, entry.data.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+        )
+        if not is_valid_scan_interval(scan_interval):
+            _LOGGER.warning(
+                "Invalid saved polling interval %r; using %s minutes until corrected in options",
+                scan_interval, DEFAULT_SCAN_INTERVAL,
+            )
+            scan_interval = DEFAULT_SCAN_INTERVAL
         update_interval = timedelta(minutes=scan_interval)
         _LOGGER.info(f"Polling pollen.lu API every {scan_interval} minutes")
 
         super().__init__(
             hass,
             _LOGGER,
+            config_entry=entry,
             name=DOMAIN,
             update_interval=update_interval,
         )
@@ -105,8 +129,11 @@ class MyCoordinator(DataUpdateCoordinator):
         _LOGGER.debug("_async_setup()")
         try:
             async with self.session.get(f"{API_URL}/translations", headers=self.headers) as response:
-                self.translations = await response.json()
-                self.translations = self.translations["data"]
+                response.raise_for_status()
+                payload = await response.json()
+                if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+                    raise ValueError("Expected a translations data list")
+                self.translations = payload["data"]
                 _LOGGER.debug("Translations fetched")
         except Exception as err:
             _LOGGER.error(f"Error fetching translations: {err}")
@@ -115,23 +142,26 @@ class MyCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self):
         """Fetch data from API endpoint."""
         _LOGGER.debug("_async_update_data()")
-        success = True
         try:
             async with self.session.get(f"{API_URL}/pollens", headers=self.headers) as response:
-                self.pollen = await response.json()
-                self.pollen = self.pollen["data"]
+                response.raise_for_status()
+                payload = await response.json()
+                if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+                    raise ValueError("Expected a pollen data list")
+                self.pollen = payload["data"]
                 self.last_poll = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
                 self.next_poll = (datetime.now().astimezone() + self.update_interval).strftime("%Y-%m-%d %H:%M:%S")
                 _LOGGER.debug("Pollen fetched")
         except Exception as err:
             _LOGGER.error(f"Error fetching pollen counts: {err}")
-            success = False
-            raise UpdateFailed(f"Error fetching pollen counts: {err}")
+            raise UpdateFailed(f"Error fetching pollen counts: {err}") from err
             
-        return {"success": success}
+        return {"success": True}
 
     async def async_force_poll(self) -> dict:
         """Handle the action call to force poll the API."""
         _LOGGER.info("Force poll action called")
-        success = await self._async_update_data()
-        return success
+        await self.async_refresh()
+        if not self.last_update_success:
+            raise HomeAssistantError("Failed to refresh Pollen.lu data") from self.last_exception
+        return {"success": True}

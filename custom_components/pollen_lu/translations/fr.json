@@ -22,6 +22,9 @@
           "scan_interval": "Intervalle de sondage de l'API en minutes"
         }
       }
+    },
+    "error": {
+      "invalid_scan_interval": "Saisissez un nombre entier de minutes supérieur à zéro."
     }
   },
   "services": {
