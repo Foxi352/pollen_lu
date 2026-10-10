@@ -23,7 +23,7 @@ def record():
 @pytest.fixture
 def sensor(record):
     coordinator = Mock(
-        pollen=[record], translations=[], last_poll=None, next_poll=None,
+        pollen=[record], translations=[], last_poll=None,
         last_update_success=True,
     )
     return PollenSensor(coordinator, record)
@@ -54,12 +54,12 @@ async def test_inactive_missing_and_recovered_sensor(hass, sensor, record):
     record["active"] = False
     assert not sensor.available
     assert sensor.native_value is None
-    assert sensor.extra_state_attributes == {"last_poll": None, "next_poll": None}
+    assert sensor.extra_state_attributes == {"last_poll": None}
     sensor.coordinator.pollen = []
     assert not sensor.available
     assert sensor.native_value is None
     assert sensor.entity_picture is None
-    assert sensor.extra_state_attributes == {"last_poll": None, "next_poll": None}
+    assert sensor.extra_state_attributes == {"last_poll": None}
     record["active"] = True
     sensor.coordinator.pollen = [record]
     assert sensor.available

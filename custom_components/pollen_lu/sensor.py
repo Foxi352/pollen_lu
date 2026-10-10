@@ -114,7 +114,6 @@ class PollenSensor(CoordinatorEntity, SensorEntity):
         """Return the state attributes."""
         attributes = {
             "last_poll": self.coordinator.last_poll,
-            "next_poll": self.coordinator.next_poll,
         }
         pollen = self._pollen
         if pollen is None or not pollen.get("active"):

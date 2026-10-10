@@ -6,13 +6,37 @@ from homeassistant.core import ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 
-from datetime import timedelta, datetime
+from datetime import timedelta, datetime, timezone
+from email.utils import parsedate_to_datetime
 import logging
+import math
+import aiohttp
+from homeassistant.util.dt import utcnow
 
 from .const import DOMAIN, API_URL, DEFAULT_SCAN_INTERVAL, is_valid_scan_interval
 
 _LOGGER = logging.getLogger(__name__)
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30, connect=10)
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """Read a positive delay in seconds or an HTTP date; ignore invalid values."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    try:
+        if value.isascii() and value.isdigit():
+            delay = float(int(value))
+        else:
+            retry_at = parsedate_to_datetime(value)
+            if retry_at.tzinfo is None:
+                # HTTP dates, including the older asctime format, are in GMT.
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            delay = (retry_at - utcnow()).total_seconds()
+    except (ValueError, TypeError, OverflowError):
+        return None
+    return delay if math.isfinite(delay) and delay > 0 else None
 
 async def async_setup(hass, config: dict) -> bool:
     """Set up the integration."""
@@ -89,7 +113,6 @@ class MyCoordinator(DataUpdateCoordinator):
         self.translations = None
         self.pollen = None
         self.last_poll = None
-        self.next_poll = None
         self.headers = {
             "Host": "pollen-api.chl.lu",
             "Accept": "*/*",
@@ -124,38 +147,58 @@ class MyCoordinator(DataUpdateCoordinator):
             update_interval=update_interval,
         )
  
-    async def _async_setup(self) -> None:
-        """Fetch translations from API endpoint."""
-        _LOGGER.debug("_async_setup()")
+    async def _async_fetch_data(self, endpoint: str) -> list:
+        """Fetch and validate an API list; the coordinator handles outage logging."""
         try:
-            async with self.session.get(f"{API_URL}/translations", headers=self.headers) as response:
+            async with self.session.get(
+                f"{API_URL}/{endpoint}",
+                headers=self.headers,
+                timeout=REQUEST_TIMEOUT,
+            ) as response:
                 response.raise_for_status()
                 payload = await response.json()
                 if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
-                    raise ValueError("Expected a translations data list")
-                self.translations = payload["data"]
-                _LOGGER.debug("Translations fetched")
-        except Exception as err:
-            _LOGGER.error(f"Error fetching translations: {err}")
-            raise UpdateFailed(f"Error fetching translations: {err}") from err
+                    raise ValueError("expected a data list")
+                return payload["data"]
+        except TimeoutError as err:
+            raise UpdateFailed(f"Timed out fetching {endpoint}") from err
+        except (ValueError, aiohttp.ContentTypeError) as err:
+            raise UpdateFailed(f"Invalid {endpoint} response: {err}") from err
+        except aiohttp.ClientResponseError as err:
+            retry_after = None
+            if err.status == 429:
+                reason = "rate limited"
+            elif err.status >= 500:
+                reason = "server error"
+            else:
+                reason = "request rejected"
+            if err.status == 429 or err.status >= 500:
+                header = err.headers.get("Retry-After") if err.headers else None
+                delay = _parse_retry_after(header)
+                if delay is not None:
+                    # A short server delay must not increase the polling frequency.
+                    retry_after = max(delay, self.update_interval.total_seconds())
+            raise UpdateFailed(
+                f"{endpoint} API {reason} (HTTP {err.status})",
+                retry_after=retry_after,
+            ) from err
+        except aiohttp.ClientError as err:
+            raise UpdateFailed(f"Connection error fetching {endpoint}") from err
+
+    async def _async_setup(self) -> None:
+        """Fetch translations from API endpoint."""
+        self.translations = await self._async_fetch_data("translations")
+        _LOGGER.debug("Translations fetched")
 
     async def _async_update_data(self):
         """Fetch data from API endpoint."""
         _LOGGER.debug("_async_update_data()")
-        try:
-            async with self.session.get(f"{API_URL}/pollens", headers=self.headers) as response:
-                response.raise_for_status()
-                payload = await response.json()
-                if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
-                    raise ValueError("Expected a pollen data list")
-                self.pollen = payload["data"]
-                self.last_poll = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
-                self.next_poll = (datetime.now().astimezone() + self.update_interval).strftime("%Y-%m-%d %H:%M:%S")
-                _LOGGER.debug("Pollen fetched")
-        except Exception as err:
-            _LOGGER.error(f"Error fetching pollen counts: {err}")
-            raise UpdateFailed(f"Error fetching pollen counts: {err}") from err
-            
+        pollen = await self._async_fetch_data("pollens")
+        last_poll = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        self.pollen = pollen
+        self.last_poll = last_poll
+        _LOGGER.debug("Pollen fetched")
+
         return {"success": True}
 
     async def async_force_poll(self) -> dict:

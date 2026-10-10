@@ -23,17 +23,24 @@ async def hass(tmp_path):
 
 
 @pytest.fixture
-def entry():
-    return ConfigEntry(
-        domain=DOMAIN,
-        title="Pollen.lu",
-        data={"name": "Pollen.lu"},
-        options={"scan_interval": 30},
-        source="user",
-        unique_id="Pollen.lu",
-        version=2,
-        minor_version=1,
-        discovery_keys=MappingProxyType({}),
-        subentries_data=None,
-        state=ConfigEntryState.LOADED,
-    )
+def entry_factory():
+    def create(state=ConfigEntryState.LOADED):
+        return ConfigEntry(
+            domain=DOMAIN,
+            title="Pollen.lu",
+            data={"name": "Pollen.lu"},
+            options={"scan_interval": 30},
+            source="user",
+            unique_id="Pollen.lu",
+            version=2,
+            minor_version=1,
+            discovery_keys=MappingProxyType({}),
+            subentries_data=None,
+            state=state,
+        )
+    return create
+
+
+@pytest.fixture
+def entry(entry_factory):
+    return entry_factory()

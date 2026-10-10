@@ -25,8 +25,8 @@ If you like this component, please give it a star on [github](https://github.com
 
 ## Installation
 
-Requires Home Assistant **2025.3.0 or newer**. Compatibility regression tests
-run against Home Assistant 2026.9.0.
+Requires Home Assistant **2025.12.0 or newer**. Compatibility regression tests
+pass against Home Assistant 2025.12.0 and 2026.10.0.
 
 1. Ensure that [HACS](https://hacs.xyz) is installed.
 2. Install **Pollen.lu** integration via HACS.
@@ -71,8 +71,7 @@ Attribute           | Example             | Description
 --------------------|---------------------|-----------------------------
 level               | high                | Actual level (undetected, low, medium, high)
 last_update         | 2024-03-29 12:00:12 | When the pollen was last counted
-last_poll           | 2024-07-03 16:10:29 | When the API was last queried
-next_poll           | 2024-07-03 17:10:29 | When the API will be queried next
+last_poll           | 2024-07-03 16:10:29 | When pollen data was last fetched successfully
 description         | Die Erle gehört ... | A localized description of the plant / tree
 moderate_threshold  | 11                  | Threshold from which the concentration is considered moderate
 high_threshold      | 51                  | Threshold from which the concentration is considered high
@@ -84,6 +83,36 @@ The friendly name and the description are both localized to the Home Assistant s
 If a translation is missing, its key is used as a fallback. Missing optional
 descriptions, pictures, and thresholds are omitted rather than replaced with
 invented values.
+
+`last_poll` records a successful API fetch; `last_update` records the measurement
+date supplied by the API. A successful fetch does not necessarily mean a new
+measurement is available. Both remain unchanged when a fetch fails.
+
+The former `next_poll` attribute has been removed because manual refreshes and
+failed requests made its estimated time misleading. Update any dashboards or
+automations that reference it.
+
+## API outages
+
+Each request has a 30-second total timeout and a 10-second connection timeout.
+Home Assistant logs the initial polling failure, suppresses repeated errors
+during the same outage, and logs recovery at INFO level. Expected failures
+include timeouts, connection errors, HTTP errors, and malformed responses.
+Unexpected errors retain their traceback for troubleshooting.
+
+During an outage, sensors become unavailable while the integration keeps the
+last successfully fetched measurements and timestamp. It retries at the
+configured polling interval. When an HTTP 429 or 5xx response includes a valid
+`Retry-After` header, Home Assistant delays the next scheduled poll by the longer
+of the requested delay and the configured interval. Both seconds and HTTP dates
+are supported. Missing, invalid, zero, or past-date headers keep normal polling;
+successful requests resume the configured interval.
+
+Initial setup failures use Home Assistant's automatic setup retry; the
+coordinator's retry delay applies only after setup has succeeded. Manual refreshes
+explicitly override the scheduled wait: the force-poll action makes one bounded
+fetch attempt immediately and reports an error if it fails. A successful manual
+refresh also restores normal polling.
 
 ## Actions
 
@@ -118,7 +147,7 @@ automation:
 
 ## Development checks
 
-The compatibility regression tests use Home Assistant 2026.9.0's flow, service,
+The compatibility regression tests use Home Assistant 2026.10.0's flow, service,
 and coordinator APIs with mocked network requests and platform loading.
 Run them in a Python 3.14 virtual environment:
 
@@ -126,3 +155,13 @@ Run them in a Python 3.14 virtual environment:
 python -m pip install -r requirements-test.txt
 python -m pytest -q tests
 ```
+
+To check the minimum version, use a separate Python 3.13 virtual environment:
+
+```sh
+python -m pip install 'homeassistant==2025.12.0' 'pycares<5' 'pytest==9.1.1' 'pytest-asyncio==1.4.0'
+python -m pytest -q tests
+```
+
+The DNS dependency constraint keeps that older Home Assistant release's
+`aiodns` dependency compatible in a newly created test environment.
